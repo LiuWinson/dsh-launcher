@@ -1330,17 +1330,17 @@ function Invoke-Upgrades {
                 if (-not $DryRun -and -not (Test-Path -LiteralPath $pj)) {
                     Set-Content -LiteralPath $pj -Value '{"name":"dsh-runtime","private":true}' -Encoding UTF8
                 }
-                $rc = Invoke-NpmCmd -WorkDir $cfg.RuntimeDir -Arguments @('install', ($cfg.DshPackage + '@' + $ver), '--no-audit', '--no-fund', '--registry', $cfg.Registry) -Title ('安装 ' + $cfg.DshPackage + '@' + $ver)
+                $rc = Invoke-NpmCmd -WorkDir $cfg.RuntimeDir -Arguments @('install', ($cfg.DshPackage + '@' + $ver), '--no-audit', '--no-fund', '--registry', $cfg.Registry, '--fetch-retries=5', '--fetch-retry-mintimeout=20000', '--fetch-retry-maxtimeout=120000', '--fetch-timeout=900000', '--maxsockets=4')   # 抗抖动：公司网络下 E504 多为并发/超时 -Title ('安装 ' + $cfg.DshPackage + '@' + $ver)
                 if ($rc -ne 0) { $ok = $false; $script:UpgradeLog += ('安装失败 (exit ' + $rc + ')') } else { $script:UpgradeLog += ('已安装 ' + $ver) }
             }
             '^dsh$' {
                 $ver = $it.Target
                 if (-not $ver) { $ver = Get-RemoteVersion -Package $cfg.DshPackage -Tag 'latest' }
-                $rc = Invoke-NpmCmd -WorkDir $cfg.RuntimeDir -Arguments @('install', ($cfg.DshPackage + '@' + $ver), '--no-audit', '--no-fund', '--registry', $cfg.Registry) -Title ('DSH 主体 -> ' + $ver)
+                $rc = Invoke-NpmCmd -WorkDir $cfg.RuntimeDir -Arguments @('install', ($cfg.DshPackage + '@' + $ver), '--no-audit', '--no-fund', '--registry', $cfg.Registry, '--fetch-retries=5', '--fetch-retry-mintimeout=20000', '--fetch-retry-maxtimeout=120000', '--fetch-timeout=900000', '--maxsockets=4')   # 抗抖动：公司网络下 E504 多为并发/超时 -Title ('DSH 主体 -> ' + $ver)
                 if ($rc -ne 0) { $ok = $false; $script:UpgradeLog += ('DSH 主体升级失败 (exit ' + $rc + ')') } else { $script:UpgradeLog += ('DSH 主体已升到 ' + $ver) }
             }
             '^core$' {
-                $rc = Invoke-NpmCmd -WorkDir $cfg.RuntimeDir -Arguments @('update', '--no-audit', '--no-fund', '--registry', $cfg.Registry) -Title '内核核心包'
+                $rc = Invoke-NpmCmd -WorkDir $cfg.RuntimeDir -Arguments @('update', '--no-audit', '--no-fund', '--registry', $cfg.Registry, '--fetch-retries=5', '--fetch-retry-mintimeout=20000', '--fetch-retry-maxtimeout=120000', '--fetch-timeout=900000', '--maxsockets=4')   # 抗抖动：公司网络下 E504 多为并发/超时 -Title '内核核心包'
                 if ($rc -ne 0) { $ok = $false; $script:UpgradeLog += ('内核升级失败 (exit ' + $rc + ')') } else { $script:UpgradeLog += '内核核心包已更新' }
             }
             '^node$' {
