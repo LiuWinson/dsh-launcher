@@ -131,6 +131,31 @@ if (!chosen) {
   chosen = sib.find((c) => c.hasIdent) || null;
 }
 
+function summaryLines(note) {
+  const rel = (p) => path.relative(runtime, p);
+  const L = [];
+  L.push('================ 请把下面这几行发给 DSH（照抄/复制粘贴即可） ================');
+  L.push('补丁版本: ' + marker);
+  L.push('入口: ' + rel(entry) + (fs.existsSync(entry) ? '（' + fs.statSync(entry).size + ' 字节）' : '（不存在）'));
+  try {
+    const pj = path.join(pkgDir, 'package.json');
+    if (fs.existsSync(pj)) { const j = JSON.parse(fs.readFileSync(pj, 'utf8')); L.push('包: ' + j.name + '@' + j.version); }
+  } catch { }
+  const hitList = candidates.filter((c) => c.txt.includes(IDENT));
+  L.push('扫描: ' + scope + '，共 ' + candidates.length + ' 个文件，其中含 ' + IDENT + ' 的 ' + hitList.length + ' 个');
+  for (const c of hitList.slice(0, 5)) L.push('  命中: ' + rel(c.file) + '（' + c.txt.length + ' 字符, ' + (c.label || 'chain') + '）');
+  const ex = candidates.find((c) => c.file === entry) || candidates[0];
+  if (ex) {
+    L.push('入口文件前几行:');
+    for (const l of ex.txt.split(/\r?\n/).filter((x) => x.trim()).slice(0, 4)) L.push('  | ' + l.trim().slice(0, 100));
+    const exp = ex.txt.split(/\r?\n/).filter((l) => /export|module\.exports/.test(l)).slice(0, 6);
+    if (exp.length > 0) { L.push('导出相关行:'); for (const l of exp) L.push('  | ' + l.trim().slice(0, 100)); }
+  }
+  L.push('结论: ' + note);
+  L.push('==========================================================================');
+  return L;
+}
+
 function writeDiag(note) {
   try {
     const lines = [];
@@ -157,7 +182,9 @@ function writeDiag(note) {
       exp.forEach((l) => lines.push('  | ' + l.trim()));
     }
     fs.writeFileSync(diagPath, lines.join('\r\n'), 'utf8');
-    say('      · 诊断已写入：' + diagPath + '（把它发给 DSH 就能定位）');
+    say('      · 诊断已写入：' + diagPath);
+    // 很多公司内网不让往外发文件 —— 所以同样内容再打印一份"短版"到控制台，直接复制粘贴即可。
+    for (const l of summaryLines(note)) say(l);
   } catch (e) {
     say('      · 诊断写入失败：' + e.message);
   }
