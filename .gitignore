@@ -7,3 +7,6 @@ _block-*.txt
 _360diag/
 .dsh-vision/
 *.log
+# 补丁失败时生成的诊断（每台机器不同，属本地产物）
+patch-diag.txt
+*.dshbak

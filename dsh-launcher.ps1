@@ -68,8 +68,8 @@ $script:UpgradeLog = @()
 $script:CheckAborted = $false      # 用户在检查过程中按了键
 $script:SkippedUpgrade = $false    # 用户在升级过程中按键跳过了剩余项
 $script:NodeVerCache = ''
-$script:PatchMarker = 'dsh-launcher-patch: reveal-foreground v7'   # 补丁版本标记（改了补丁内容就升版本）
-$script:LauncherVersion = 'v7'   # 启动器版本（横幅与诊断里会打印，方便远程确认用户跑的是哪一版）
+$script:PatchMarker = 'dsh-launcher-patch: reveal-foreground v8'   # 补丁版本标记（改了补丁内容就升版本）
+$script:LauncherVersion = 'v8'   # 启动器版本（横幅与诊断里会打印，方便远程确认用户跑的是哪一版）
 $script:BridgePatchMarker = 'dsh-bridge-patch: question-answerer v5'  # 微信桥接补丁的版本标记（插件侧）
 $script:BridgeDaemonPatchMarker = 'dsh-bridge-patch: qa-answer-short-circuit v1'  # 微信桥接补丁的版本标记（守护进程侧）
 
@@ -725,69 +725,32 @@ function Invoke-DshPatches {
         Write-Host ("  [i] 补丁：已创建开窗 shim {0}" -f $shim) -ForegroundColor DarkGray
     }
 
-    # v7：先顺着"转发链"找到真正实现 revealNativePath 的那个文件
-    #（新版本 index.js 可能只是 export * from './xxx.js'，直接在入口文件里找当然找不到）
-    $file = $entry
-    $txt  = [System.IO.File]::ReadAllText($file)
-    $hops = @()
-    $depth = 0
-    while (-not $txt.Contains('revealNativePath') -and $depth -lt 3) {
-        $m = [regex]::Match($txt, 'from\s+["'']\.{1,2}/([^"'']+)["'']')
-        if (-not $m.Success) { break }
-        $rel = $m.Groups[1].Value
-        $base = Join-Path (Split-Path -Parent $file) $rel
-        $cand = $null
-        foreach ($c in @($base, ($base + '.js'), ($base + '.mjs'), (Join-Path $base 'index.js'))) {
-            if (Test-Path -LiteralPath $c) { $cand = $c; break }
-        }
-        if (-not $cand) { break }
-        $file = $cand
-        $txt = [System.IO.File]::ReadAllText($file)
-        $hops += (Split-Path -Leaf $file)
-        $depth++
-    }
-    if ($hops.Count -gt 0) {
-        Write-Host ('  [i] 补丁：入口是转发，已顺着 ' + ($hops -join ' -> ') + ' 找到实现文件') -ForegroundColor DarkGray
-    }
-
-    if ($txt.Contains([string]$script:PatchMarker)) {
-        Write-Host '  [OK] 补丁：资源管理器窗口置顶 v7（已就位）' -ForegroundColor Green
-        return $true
-    }
-    if ($txt.Contains('function dshRevealInExplorer(') -or $txt.Contains('dshRevealWrapped')) {
-        # 已经打过旧版补丁：先用备份还原成原厂文件，再注入新版（避免叠加注入）
-        $bak = $file + '.dshbak'
-        if (Test-Path -LiteralPath $bak) {
-            Copy-Item -LiteralPath $bak -Destination $file -Force
-            $txt = [System.IO.File]::ReadAllText($file)
-            Write-Host '  [i] 补丁：发现旧版补丁，已用备份还原，准备注入 v7' -ForegroundColor DarkGray
-        } else {
-            Write-Host '  [!] 补丁：有旧版补丁但没有备份，跳过（避免叠加）' -ForegroundColor Yellow
-            return $false
-        }
-    }
-    # v7：不碰上游函数体，只在文件末尾追加包装（重新赋值导出的 revealNativePath，
-    # ESM 活绑定对 import 方立刻生效）。只要这个文件里有 revealNativePath 就能打上；
-    # runner 在包装里做三重兜底（internals.run → runNativeCommand → 退回原实现）。
-    if (-not $txt.Contains('revealNativePath')) {
-        Write-Host '  [!] 补丁：这个版本的 dsh-native-command 里找不到 revealNativePath，跳过（功能退回原样）' -ForegroundColor Yellow
-        Write-PatchDiag -File $file -Text $txt -Note ('顺着转发链走到 ' + $file + '，仍未找到 revealNativePath')
+    # v8：注入逻辑整体搬到 node 脚本 patch-native-command.mjs ——
+    # v4/v5 靠上游固定结构、v6/v7 靠相对转发链，在另一台电脑（包布局不同）都失败了。
+    # node 脚本里做的是：顺着转发链找 → 整包搜索 → 兄弟 @deepseek-ai 包搜索，
+    # 找到真正声明 revealNativePath 的文件再在末尾追加包装，失败时自己写 patch-diag.txt。
+    $helper = Join-Path $PSScriptRoot 'patch-native-command.mjs'
+    $node   = (Get-Command node.exe -ErrorAction SilentlyContinue).Source
+    if (-not (Test-Path -LiteralPath $helper)) {
+        Write-Host '  [!] 补丁：找不到 patch-native-command.mjs（应与启动器同目录），跳过（功能退回原样）' -ForegroundColor Yellow
         return $false
     }
-    $eol = "`n"
-    if ($txt.Contains("`r`n")) { $eol = "`r`n" }
-    $helper  = (Get-RevealPatchHelper).Replace('__SHIM_CMD__', $shim.Replace('\', '\\')).Replace('__FOCUS_PS1__', $focus.Replace('\', '\\')).Replace("`r`n", "`n").TrimEnd("`n")
-    $wrapper = $helper -replace "`n", $eol
-    $out = $txt.TrimEnd() + $eol + $eol + $wrapper + $eol
-    Copy-Item -LiteralPath $file -Destination ($file + '.dshbak') -Force
-    [System.IO.File]::WriteAllText($file, $out)
-    $chk = [System.IO.File]::ReadAllText($file)
-    if ($chk.Contains('dshRevealWrapped') -and $chk.Contains('reveal-foreground v7')) {
-        Write-Host ('  [OK] 补丁：资源管理器窗口置顶 v7（已注入 ' + (Split-Path -Leaf $file) + '，原文件备份为 .dshbak）') -ForegroundColor Green
-        return $true
+    if (-not $node) {
+        Write-Host '  [!] 补丁：找不到 node.exe，跳过（功能退回原样）' -ForegroundColor Yellow
+        return $false
     }
-    Write-Host '  [!] 补丁：写入后自检没过，已留 .dshbak 备份' -ForegroundColor Red
-    Write-PatchDiag -File $file -Text $chk -Note '写入后自检失败'
+    $diag = Join-Path $PSScriptRoot 'patch-diag.txt'
+    $raw  = & $node $helper --runtime $RuntimeDir --shim $shim --focus $focus --marker ([string]$script:PatchMarker) --diag $diag 2>&1
+    $text = (($raw | ForEach-Object { [string]$_ }) -join "`n")
+    $result = 'UNKNOWN'
+    foreach ($line in ($text -split "`n")) {
+        if ($line.StartsWith('RESULT: ')) { $result = $line.Substring(8).Trim(); continue }
+        if ($line.Trim().Length -eq 0) { continue }
+        $color = 'Gray'
+        if ($line -match '\[OK\]') { $color = 'Green' } elseif ($line -match '\[!\]') { $color = 'Yellow' } elseif ($line -match '\[i\]') { $color = 'DarkGray' }
+        Write-Host $line -ForegroundColor $color
+    }
+    if ($result -eq 'OK') { return $true }
     return $false
 }
 
