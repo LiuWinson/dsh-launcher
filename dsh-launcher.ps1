@@ -68,7 +68,7 @@ $script:UpgradeLog = @()
 $script:CheckAborted = $false      # 用户在检查过程中按了键
 $script:SkippedUpgrade = $false    # 用户在升级过程中按键跳过了剩余项
 $script:NodeVerCache = ''
-$script:PatchMarker = 'dsh-launcher-patch: reveal-foreground v4'   # 补丁版本标记（改了补丁内容就升版本）
+$script:PatchMarker = 'dsh-launcher-patch: reveal-foreground v5'   # 补丁版本标记（改了补丁内容就升版本）
 $script:BridgePatchMarker = 'dsh-bridge-patch: question-answerer v5'  # 微信桥接补丁的版本标记（插件侧）
 $script:BridgeDaemonPatchMarker = 'dsh-bridge-patch: qa-answer-short-circuit v1'  # 微信桥接补丁的版本标记（守护进程侧）
 
@@ -643,7 +643,7 @@ function Invoke-StatusCheck {
 # ============================================================================
 function Get-RevealPatchHelper {
     return @'
-/* dsh-launcher-patch: reveal-foreground v4 —— 由 DSH 启动器注入，dsh 升级后启动器会自动重打 */
+/* dsh-launcher-patch: reveal-foreground v5 —— 由 DSH 启动器注入，dsh 升级后启动器会自动重打 */
 async function dshRevealInExplorer(windowsPath, signal, run) {
 	try {
 		// ① 开窗：经 cmd 转一手，让 explorer 拿到正常的启动信息（node 直接 execFile 会被 SW_HIDE 吃掉）
@@ -686,7 +686,7 @@ function Invoke-DshPatches {
     }
     $txt = [System.IO.File]::ReadAllText($file)
     if ($txt.Contains([string]$script:PatchMarker)) {
-        Write-Host '  [OK] 补丁：资源管理器窗口置顶 v4（已就位）' -ForegroundColor Green
+        Write-Host '  [OK] 补丁：资源管理器窗口置顶 v5（已就位）' -ForegroundColor Green
         return $true
     }
     if ($txt.Contains('function dshRevealInExplorer(')) {
@@ -695,29 +695,47 @@ function Invoke-DshPatches {
         if (Test-Path -LiteralPath $bak) {
             Copy-Item -LiteralPath $bak -Destination $file -Force
             $txt = [System.IO.File]::ReadAllText($file)
-            Write-Host '  [i] 补丁：发现旧版补丁，已用备份还原，准备注入 v4' -ForegroundColor DarkGray
+            Write-Host '  [i] 补丁：发现旧版补丁，已用备份还原，准备注入 v5' -ForegroundColor DarkGray
         } else {
             Write-Host '  [!] 补丁：有旧版补丁但没有备份，跳过（避免叠加）' -ForegroundColor Yellow
             return $false
         }
     }
-    $anchorFn   = 'async function revealNativePath(path, signal, internals = {}) {'
-    $anchorCall = 'await run("explorer.exe", ["/select,", target], signal);'
-    if (-not $txt.Contains($anchorFn) -or -not $txt.Contains($anchorCall)) {
+    # v5：注入点改成"宽松匹配"——不同 DSH 版本这两处只差参数名/空格/引号，
+    # 硬编码字面量会误报"结构变了"，把能用的补丁白跳过。
+    $fnRe   = [regex]'async function revealNativePath\s*\([^)]*\)\s*\{'
+    $callRe = [regex]'await run\(\s*["'']explorer\.exe["'']\s*,\s*\[[^\]]*\]\s*(?:,[^;]*)?\);'
+    $mFn    = $fnRe.Match($txt)
+    $mCall  = $callRe.Match($txt)
+    if (-not $mFn.Success -or -not $mCall.Success) {
         Write-Host '  [!] 补丁：dsh-native-command 结构变了，注入点找不到，跳过（功能退回原样）' -ForegroundColor Yellow
+        Write-Host ('      · 目标文件：' + $file)
+        Write-Host ('      · 函数头找到：' + $mFn.Success + '；explorer 调用找到：' + $mCall.Success)
+        $hits = @($txt -split "`n" | Select-String -Pattern 'revealNativePath|explorer\.exe' | Select-Object -First 6)
+        foreach ($h in $hits) { Write-Host ('      · 线索 ' + $h.LineNumber + '：' + $h.Line.Trim()) }
+        Write-Host '      · 把上面几行发给我，就能补上这个版本的适配' -ForegroundColor DarkGray
         return $false
     }
+    $anchorFn   = $mFn.Value
+    $anchorCall = $mCall.Value
     $eol = "`n"
     if ($txt.Contains("`r`n")) { $eol = "`r`n" }
     $helper = (Get-RevealPatchHelper).Replace('__SHIM_CMD__', $shim.Replace('\', '\\')).Replace('__FOCUS_PS1__', $focus.Replace('\', '\\')).Replace("`r`n", "`n").TrimEnd("`n")
     $newFn   = $helper -replace "`n", $eol
-    $newCall = "`t`t`tif (await dshRevealInExplorer(windowsPath, signal, run)) return;" + $eol + "`t`t`t" + $anchorCall
+    # v5：保留原调用行的缩进；要传的 Windows 路径写成"版本无关"表达式
+    #（有的版本里叫 windowsPath、有的没有；typeof 对未声明变量是安全的，会退回 path）。
+    $callLineStart = $txt.LastIndexOf("`n", $mCall.Index) + 1
+    $callIndent = ''
+    if ($callLineStart -gt 0 -and $callLineStart -lt $mCall.Index) { $callIndent = $txt.Substring($callLineStart, $mCall.Index - $callLineStart) }
+    $guard   = 'if (await dshRevealInExplorer(typeof windowsPath === "string" ? windowsPath : path, signal, run)) return;'
+    # 守卫行直接接在原有的缩进后面（匹配从 await 开始，行首缩进还在原文里）；第二行才需要补缩进。
+    $newCall = $guard + $eol + $callIndent + $anchorCall
     $out = $txt.Replace($anchorFn, $newFn + $eol + $eol + $anchorFn).Replace($anchorCall, $newCall)
     Copy-Item -LiteralPath $file -Destination ($file + '.dshbak') -Force
     [System.IO.File]::WriteAllText($file, $out)
     $chk = [System.IO.File]::ReadAllText($file)
-    if ($chk.Contains('dshRevealInExplorer(windowsPath, signal, run)') -and $chk.Contains('reveal-foreground v4')) {
-        Write-Host '  [OK] 补丁：资源管理器窗口置顶 v4（已注入，原文件备份为 .dshbak）' -ForegroundColor Green
+    if ($chk.Contains('dshRevealInExplorer(typeof windowsPath') -and $chk.Contains('reveal-foreground v5')) {
+        Write-Host '  [OK] 补丁：资源管理器窗口置顶 v5（已注入，原文件备份为 .dshbak）' -ForegroundColor Green
         return $true
     }
     Write-Host '  [!] 补丁：写入后自检没过，已留 .dshbak 备份' -ForegroundColor Red
@@ -1283,21 +1301,51 @@ function Start-DshServer {
     $proc = Start-Process -FilePath $exe -ArgumentList $argList -WindowStyle Hidden `
         -RedirectStandardOutput $outLog -RedirectStandardError $errLog -PassThru
 
-    $deadline = (Get-Date).AddSeconds(90)
-    $ready = $false
+    # v5 修"第一次打开页面显示连接不到服务器"：
+    #   ① 首次运行（运行环境还没装、走 npx 现场下载）动辄几分钟，原来固定等 90 秒必然放弃；
+    #   ② "端口开了"不等于"HTTP 能应答"，端口刚开就拉浏览器就会看到连不上。
+    $firstRun    = -not (Test-Path -LiteralPath $bin)
+    $waitSeconds = 900
+    if (-not $firstRun) { $waitSeconds = 150 }
+    $start    = Get-Date
+    $deadline = $start.AddSeconds($waitSeconds)
+    $ready    = $false
+    $lastNote = 0
     while ((Get-Date) -lt $deadline) {
         if (Test-PortOpen -Port $Port) { $ready = $true; break }
         if ($proc -and $proc.HasExited) { break }
+        $elapsed = [int]((Get-Date) - $start).TotalSeconds
+        if ($elapsed - $lastNote -ge 15) {
+            $lastNote = $elapsed
+            if ($firstRun) { Write-Host ('       …已等待 ' + $elapsed + ' 秒（首次运行正在下载运行环境，属正常，请勿关窗）') -ForegroundColor DarkGray }
+            else { Write-Host ('       …已等待 ' + $elapsed + ' 秒') -ForegroundColor DarkGray }
+        }
         Start-Sleep -Milliseconds 700
     }
 
     if ($ready) {
+        # 端口通了再等 HTTP 真能出页面（最多 60 秒），避免浏览器一开就是"连接不到服务器"
+        $httpOk = $false
+        $hdeadline = (Get-Date).AddSeconds(60)
+        while ((Get-Date) -lt $hdeadline) {
+            try {
+                $resp = Invoke-WebRequest -Uri ('http://127.0.0.1:' + $Port + '/') -UseBasicParsing -TimeoutSec 5
+                if ($resp.StatusCode -ge 200 -and $resp.StatusCode -lt 500) { $httpOk = $true; break }
+            } catch { }
+            Start-Sleep -Milliseconds 800
+        }
         Write-Host ('[OK] DSH 已就绪： http://127.0.0.1:' + $Port) -ForegroundColor Green
+        if (-not $httpOk) { Write-Host '       [提示] 端口已通但页面还没应答；浏览器若显示"连接不到服务器"，等几秒刷新即可' -ForegroundColor Yellow }
         try { Start-Process ("http://127.0.0.1:" + $Port) } catch { }
         return $proc
     }
 
-    Write-Host '[!] 90 秒内没有等到端口就绪，以下为最后 30 行日志：' -ForegroundColor Red
+    # 超时也不让用户干等：挂一个后台守候，DSH 真起来时自动开浏览器（最多再等 15 分钟）
+    $waiter = "for (`$i=0; `$i -lt 450; `$i++) { try { `$r = Invoke-WebRequest -Uri 'http://127.0.0.1:$Port/' -UseBasicParsing -TimeoutSec 5; if (`$r.StatusCode -ge 200 -and `$r.StatusCode -lt 500) { Start-Process 'http://127.0.0.1:$Port'; break } } catch { } Start-Sleep -Seconds 2 }"
+    try { Start-Process -FilePath 'powershell.exe' -ArgumentList '-NoProfile', '-WindowStyle', 'Hidden', '-Command', $waiter -WindowStyle Hidden | Out-Null } catch { }
+    Write-Host ('[!] ' + $waitSeconds + ' 秒内没等到端口就绪，DSH 可能还在下载/启动。') -ForegroundColor Red
+    Write-Host ('       [提示] 已挂后台守候：DSH 起来后会自动打开浏览器（也可手动刷新 http://127.0.0.1:' + $Port + '）') -ForegroundColor Yellow
+    Write-Host '以下为最后 30 行日志：' -ForegroundColor Red
     if (Test-Path -LiteralPath $outLog) { Get-Content -LiteralPath $outLog -Tail 30 | ForEach-Object { Write-Host ('   ' + $_) } }
     if (Test-Path -LiteralPath $errLog) { Get-Content -LiteralPath $errLog -Tail 30 | ForEach-Object { Write-Host ('   ' + $_) -ForegroundColor DarkYellow } }
     return $null
