@@ -750,7 +750,8 @@ function Invoke-DshPatches {
         if ($line -match '\[OK\]') { $color = 'Green' } elseif ($line -match '\[!\]') { $color = 'Yellow' } elseif ($line -match '\[i\]') { $color = 'DarkGray' }
         Write-Host $line -ForegroundColor $color
     }
-    if ($result -eq 'OK') { return $true }
+    # NA = 这个 DSH 版本本来就没有 revealNativePath（补丁不适用），不是失败
+    if ($result -eq 'OK' -or $result -eq 'NA') { return $true }
     return $false
 }
 

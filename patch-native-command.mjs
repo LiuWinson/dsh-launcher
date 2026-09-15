@@ -36,6 +36,10 @@ const pkgDir = path.join(runtime, 'node_modules', '@deepseek-ai', 'dsh-native-co
 const entry = path.join(pkgDir, 'lib', 'index.js');
 if (!fs.existsSync(entry)) { console.log('RESULT: NOTFOUND 没找到 ' + entry); process.exit(0); }
 
+function pkgVersion(dir) { try { return JSON.parse(fs.readFileSync(path.join(dir, 'package.json'), 'utf8')).version || '?'; } catch { return '?'; } }
+const nativeVer = pkgVersion(pkgDir);
+const dshVer = pkgVersion(path.join(runtime, 'node_modules', '@deepseek-ai', 'dsh'));
+
 const readText = (f) => { try { const st = fs.statSync(f); if (st.size > MAX_FILE_BYTES) return null; return fs.readFileSync(f, 'utf8'); } catch { return null; } };
 
 function resolveRelative(fromFile, spec) {
@@ -253,15 +257,21 @@ function patchFile(file, txt) {
 }
 
 if (!chosen) {
-  say('  [!] 补丁：这个版本的 dsh-native-command 里找不到 ' + IDENT + '，跳过（功能退回原样）');
-  writeDiag('整个包 + 兄弟 @deepseek-ai 包都没找到 ' + IDENT);
-  console.log('RESULT: NOTFOUND');
+  // 典型场景（2026-09-15 用户公司电脑实测）：那边是 dsh-native-command@0.1.2-rc.1，
+  // 导出里压根没有 revealNativePath —— 那个 DSH 版本还没有这个实现，补丁无处可打。
+  // 这属于"不适用"，不是故障，所以按信息输出，也不再写一堆诊断文件吓人。
+  say('  [i] 补丁：这个 DSH 版本里没有 ' + IDENT + ' —— 该版本还没有这个实现，补丁不适用（不是故障，功能保持原样）');
+  say('      · DSH 主体 @deepseek-ai/dsh@' + dshVer + ' · dsh-native-command@' + nativeVer);
+  say('      · 本机对照版本：dsh 0.1.5-rc.1 / dsh-native-command 0.1.5-rc.2（那个版本才有 revealNativePath）');
+  say('      · 想让这台也用上这个修复：在启动器的"检查更新"里别按键盘跳过，把它升级到较新版本');
+  console.log('RESULT: NA');
   console.log(out.join('\n'));
   process.exit(0);
 }
 
 const hit = chosen;
 if (hit.file !== entry) say('  [i] 补丁：实现不在入口文件，已定位到 ' + path.relative(runtime, hit.file));
+say('  [i] 补丁：目标 dsh-native-command@' + nativeVer + '（DSH 主体 ' + dshVer + '）');
 const res = patchFile(hit.file, hit.txt);
 if (res === 'SKIP') writeDiag('定位到 ' + hit.file + '，但注入/自检失败');
 console.log('RESULT: ' + res);
