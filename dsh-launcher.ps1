@@ -1240,9 +1240,32 @@ function Invoke-ToolCmd {
     }
     Push-Location -LiteralPath $WorkDir
     try {
-        & $exe @Arguments 2>&1 | ForEach-Object { Write-Host ('       ' + $_) }
+        # 收集输出：既实时回显，也用于失败后判定原因（npm 的 E504 之类对用户毫无信息量）
+        $buf = @()
+        & $exe @Arguments 2>&1 | ForEach-Object {
+            $line = [string]$_
+            $buf += $line
+            Write-Host ('       ' + $line)
+        }
         $rc = $LASTEXITCODE
         if ($null -eq $rc) { $rc = 0 }
+        if ($rc -ne 0) {
+            $joined = ($buf -join "`n")
+            $hint = $null
+            if ($joined -match 'E504|E502|E503|Gateway|gateway|504 ') {
+                $hint = '网关超时（E504/E502/E503）：npm 源那一跳不可达，多半是公司网络/代理到源的链路问题。三条路：① 换源（启动器加 -Registry <公司内网源或 https://registry.npmjs.org>）；② 给 npm 配代理（npm config set proxy / https-proxy）；③ 离线搬运运行环境（不依赖网络）。'
+            } elseif ($joined -match 'ETIMEDOUT|ESOCKETTIMEDOUT|ECONNRESET|EAI_AGAIN|ENOTFOUND|ECONNREFUSED') {
+                $hint = '连不上 npm 源（超时/DNS/被拒）：先确认这台机器能访问该源；需要走代理就给 npm 配 proxy。'
+            } elseif ($joined -match 'E401|E403') {
+                $hint = '源要求认证（401/403）：这台机器可能需要登录私服或配置 token。'
+            } elseif ($joined -match 'E404') {
+                $hint = '源上没有这个包（404）：换回官方源试试 https://registry.npmjs.org，或确认私服已同步该包。'
+            }
+            if ($hint) {
+                Write-Host ''
+                Write-Host ('       [提示] ' + $hint) -ForegroundColor Yellow
+            }
+        }
         return $rc
     } catch {
         Write-Host ('       [!] ' + $_.Exception.Message) -ForegroundColor Red
