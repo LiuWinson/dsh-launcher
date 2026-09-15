@@ -1,0 +1,9 @@
+# 备份与临时件（本地留存，不进仓库）
+*.bak
+*.bak-*
+*.pre-v*.bak
+*.pre-*.bak
+_block-*.txt
+_360diag/
+.dsh-vision/
+*.log
