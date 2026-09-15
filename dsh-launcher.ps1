@@ -1190,6 +1190,78 @@ function Invoke-BridgePatches {
     return [bool]($a -or $b -or $c -or $d -or $e -or $f -or $g)
 }
 
+# ============================================================================
+#  外部命令执行（升级用）：Resolve-Executable / Invoke-ToolCmd / Invoke-NpmCmd / Invoke-PnpmCmd
+#  2026-09-15 补回：这 4 个函数在做「资源管理器置顶 v4」那轮改造时被误删，导致任何"需要升级"
+#  的机器都会报「无法将 Invoke-NpmCmd 识别为 cmdlet」——升级路径整体失效（本机因一直"已是最新"
+#  而没暴露）。从 dsh-launcher.ps1.pre-v4.bak 原样搬回。
+# ============================================================================
+function Resolve-Executable {
+    param([string[]]$Names)
+    foreach ($n in $Names) {
+        $c = Get-Command $n -ErrorAction SilentlyContinue | Select-Object -First 1
+        if ($c -and $c.Source) {
+            if ($c.CommandType -eq 'Application' -or (Test-Path -LiteralPath $c.Source)) { return $c.Source }
+        }
+    }
+    $dirs = @()
+    foreach ($d in @(([Environment]::GetEnvironmentVariable('Path', 'Machine')),
+                     ([Environment]::GetEnvironmentVariable('Path', 'User')),
+                     $env:PATH)) {
+        if (-not $d) { continue }
+        foreach ($x in ($d -split ';')) {
+            $t = $x.Trim()
+            if ($t -ne '' -and $dirs -notcontains $t) { $dirs += $t }
+        }
+    }
+    foreach ($n in $Names) {
+        foreach ($d in $dirs) {
+            $p = Join-Path $d $n
+            if (Test-Path -LiteralPath $p) { return $p }
+        }
+    }
+    return $null
+}
+
+function Invoke-ToolCmd {
+    param([string[]]$Candidates, [string]$WorkDir, [string[]]$Arguments, [string]$Title, [string]$What)
+    Write-Host ''
+    Write-Host ('[升级] ' + $Title) -ForegroundColor Yellow
+    $exe = Resolve-Executable -Names $Candidates
+    if (-not $exe) {
+        Write-Host ('       [!] 这台机器上找不到 ' + $What + '，跳过这一步（不影响启动 DSH）') -ForegroundColor Red
+        return 127
+    }
+    Write-Host ('       ' + $exe + ' ' + ($Arguments -join ' '))
+    if ($DryRun) { return 0 }
+    if (-not (Test-Path -LiteralPath $WorkDir)) {
+        Write-Host ('       [!] 目录不存在: ' + $WorkDir) -ForegroundColor Red
+        return 1
+    }
+    Push-Location -LiteralPath $WorkDir
+    try {
+        & $exe @Arguments 2>&1 | ForEach-Object { Write-Host ('       ' + $_) }
+        $rc = $LASTEXITCODE
+        if ($null -eq $rc) { $rc = 0 }
+        return $rc
+    } catch {
+        Write-Host ('       [!] ' + $_.Exception.Message) -ForegroundColor Red
+        return 1
+    } finally { Pop-Location }
+}
+
+function Invoke-NpmCmd {
+    param([string]$WorkDir, [string[]]$Arguments, [string]$Title)
+    return Invoke-ToolCmd -Candidates @('npm.cmd', 'npm.exe', 'npm.bat', 'npm') `
+        -WorkDir $WorkDir -Arguments $Arguments -Title $Title -What 'npm'
+}
+
+function Invoke-PnpmCmd {
+    param([string]$WorkDir, [string[]]$Arguments, [string]$Title)
+    return Invoke-ToolCmd -Candidates @('pnpm.cmd', 'pnpm.exe', 'pnpm.bat', 'pnpm') `
+        -WorkDir $WorkDir -Arguments $Arguments -Title $Title -What 'pnpm'
+}
+
 function Invoke-Upgrades {
     param($Chosen, $Plugins)
 
