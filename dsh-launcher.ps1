@@ -68,7 +68,8 @@ $script:UpgradeLog = @()
 $script:CheckAborted = $false      # 用户在检查过程中按了键
 $script:SkippedUpgrade = $false    # 用户在升级过程中按键跳过了剩余项
 $script:NodeVerCache = ''
-$script:PatchMarker = 'dsh-launcher-patch: reveal-foreground v6'   # 补丁版本标记（改了补丁内容就升版本）
+$script:PatchMarker = 'dsh-launcher-patch: reveal-foreground v7'   # 补丁版本标记（改了补丁内容就升版本）
+$script:LauncherVersion = 'v7'   # 启动器版本（横幅与诊断里会打印，方便远程确认用户跑的是哪一版）
 $script:BridgePatchMarker = 'dsh-bridge-patch: question-answerer v5'  # 微信桥接补丁的版本标记（插件侧）
 $script:BridgeDaemonPatchMarker = 'dsh-bridge-patch: qa-answer-short-circuit v1'  # 微信桥接补丁的版本标记（守护进程侧）
 
@@ -643,22 +644,26 @@ function Invoke-StatusCheck {
 # ============================================================================
 function Get-RevealPatchHelper {
     return @'
-/* dsh-launcher-patch: reveal-foreground v6 —— 由 DSH 启动器注入（文件末尾"包装"注入），dsh 升级后启动器会自动重打 */
+/* dsh-launcher-patch: reveal-foreground v7 —— 由 DSH 启动器注入（文件末尾"包装"注入），dsh 升级后启动器会自动重打 */
 const __dshRevealOriginal = revealNativePath;
 revealNativePath = async function dshRevealWrapped(path, signal, internals = {}) {
 	try {
 		if ((internals.platform ?? process.platform) === "win32") {
-			const run = internals.run ?? runNativeCommand;
-			const target = String(path);
-			// ① 开窗：经 cmd 转一手，让 explorer 拿到正常启动信息（node 直接 execFile 会被 SW_HIDE 吃掉）
-			try { await run("cmd.exe", ["/c", "__SHIM_CMD__", target], signal); }
-			catch (launchError) { if (!(launchError && launchError.code === 1)) throw launchError; }
-			// ② 置前：PowerShell 只做 AppActivate，不自己启动 explorer（否则触发 360）
-			try {
-				const shell = (process.env.SystemRoot || "C:\\Windows") + "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
-				await run(shell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "__FOCUS_PS1__", "-Path", target], signal);
-			} catch { }
-			return;
+			// runner 优先用调用方传进来的（internals.run），没有再看本模块的 runNativeCommand，
+			// 两者都没有就退回原实现 —— 这样不同版本打包方式都能用。
+			const run = internals.run ?? (typeof runNativeCommand === "function" ? runNativeCommand : null);
+			if (run) {
+				const target = String(path);
+				// ① 开窗：经 cmd 转一手，让 explorer 拿到正常启动信息（node 直接 execFile 会被 SW_HIDE 吃掉）
+				try { await run("cmd.exe", ["/c", "__SHIM_CMD__", target], signal); }
+				catch (launchError) { if (!(launchError && launchError.code === 1)) throw launchError; }
+				// ② 置前：PowerShell 只做 AppActivate，不自己启动 explorer（否则触发 360）
+				try {
+					const shell = (process.env.SystemRoot || "C:\\Windows") + "\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
+					await run(shell, ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", "__FOCUS_PS1__", "-Path", target], signal);
+				} catch { }
+				return;
+			}
 		}
 	} catch { /* 任何异常都退回原实现，绝不把功能弄坏 */ }
 	return __dshRevealOriginal(path, signal, internals);
@@ -667,12 +672,14 @@ revealNativePath = async function dshRevealWrapped(path, signal, internals = {})
 }
 
 # 补丁失败时把诊断落到文件，用户可以直接把文件发回来（控制台内容不好复制）
+# 补丁失败时把诊断落到文件，用户可以直接把文件发回来（控制台内容不好复制）
 function Write-PatchDiag {
     param([string]$File, [string]$Text, [string]$Note)
     try {
         $diag = Join-Path $PSScriptRoot 'patch-diag.txt'
         $lines = @()
         $lines += 'DSH 启动器 · 补丁诊断  ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+        $lines += '启动器版本: ' + $script:LauncherVersion + '（置顶补丁 ' + $script:PatchMarker + '）'
         $lines += '目标文件: ' + $File
         if (Test-Path -LiteralPath $File) { $lines += ('文件大小: ' + (Get-Item -LiteralPath $File).Length + ' 字节') }
         $lines += '本次匹配情况: ' + $Note
@@ -683,9 +690,12 @@ function Write-PatchDiag {
             if ($ver.Length -gt 300) { $ver = $ver.Substring(0, 300) }
             $lines += '包信息: ' + $ver
         }
+        $lines += '首 6 行:'
+        $head = @($Text -split "`n" | Select-Object -First 6)
+        foreach ($h in $head) { $lines += ('  | ' + $h.TrimEnd()) }
         $lines += ''
-        $lines += '候选线索（含 reveal / explorer / export 的行，最多 30 行）:'
-        $hits = @($Text -split "`n" | Select-String -Pattern 'reveal|explorer|export \{' | Select-Object -First 30)
+        $lines += '候选线索（含 reveal / explorer / export / from 的行，最多 30 行）:'
+        $hits = @($Text -split "`n" | Select-String -Pattern 'reveal|explorer|export |from ' | Select-Object -First 30)
         if ($hits.Count -eq 0) { $lines += '  (一行都没有 —— 说明这个版本根本不是同一套实现)' }
         foreach ($h in $hits) { $lines += ('  ' + $h.LineNumber + ': ' + $h.Line.Trim()) }
         [System.IO.File]::WriteAllText($diag, ($lines -join "`r`n"), (New-Object System.Text.UTF8Encoding($true)))
@@ -697,8 +707,8 @@ function Write-PatchDiag {
 
 function Invoke-DshPatches {
     param([string]$RuntimeDir)
-    $file = Join-Path $RuntimeDir 'node_modules\@deepseek-ai\dsh-native-command\lib\index.js'
-    if (-not (Test-Path -LiteralPath $file)) {
+    $entry = Join-Path $RuntimeDir 'node_modules\@deepseek-ai\dsh-native-command\lib\index.js'
+    if (-not (Test-Path -LiteralPath $entry)) {
         Write-Host '  [i] 补丁：没找到 dsh-native-command，跳过' -ForegroundColor DarkGray
         return $false
     }
@@ -714,9 +724,34 @@ function Invoke-DshPatches {
         [System.IO.File]::WriteAllText($shim, "@echo off`r`nexplorer.exe /select,`"%~1`"`r`n", [System.Text.Encoding]::ASCII)
         Write-Host ("  [i] 补丁：已创建开窗 shim {0}" -f $shim) -ForegroundColor DarkGray
     }
-    $txt = [System.IO.File]::ReadAllText($file)
+
+    # v7：先顺着"转发链"找到真正实现 revealNativePath 的那个文件
+    #（新版本 index.js 可能只是 export * from './xxx.js'，直接在入口文件里找当然找不到）
+    $file = $entry
+    $txt  = [System.IO.File]::ReadAllText($file)
+    $hops = @()
+    $depth = 0
+    while (-not $txt.Contains('revealNativePath') -and $depth -lt 3) {
+        $m = [regex]::Match($txt, 'from\s+["'']\.{1,2}/([^"'']+)["'']')
+        if (-not $m.Success) { break }
+        $rel = $m.Groups[1].Value
+        $base = Join-Path (Split-Path -Parent $file) $rel
+        $cand = $null
+        foreach ($c in @($base, ($base + '.js'), ($base + '.mjs'), (Join-Path $base 'index.js'))) {
+            if (Test-Path -LiteralPath $c) { $cand = $c; break }
+        }
+        if (-not $cand) { break }
+        $file = $cand
+        $txt = [System.IO.File]::ReadAllText($file)
+        $hops += (Split-Path -Leaf $file)
+        $depth++
+    }
+    if ($hops.Count -gt 0) {
+        Write-Host ('  [i] 补丁：入口是转发，已顺着 ' + ($hops -join ' -> ') + ' 找到实现文件') -ForegroundColor DarkGray
+    }
+
     if ($txt.Contains([string]$script:PatchMarker)) {
-        Write-Host '  [OK] 补丁：资源管理器窗口置顶 v6（已就位）' -ForegroundColor Green
+        Write-Host '  [OK] 补丁：资源管理器窗口置顶 v7（已就位）' -ForegroundColor Green
         return $true
     }
     if ($txt.Contains('function dshRevealInExplorer(') -or $txt.Contains('dshRevealWrapped')) {
@@ -725,21 +760,18 @@ function Invoke-DshPatches {
         if (Test-Path -LiteralPath $bak) {
             Copy-Item -LiteralPath $bak -Destination $file -Force
             $txt = [System.IO.File]::ReadAllText($file)
-            Write-Host '  [i] 补丁：发现旧版补丁，已用备份还原，准备注入 v6' -ForegroundColor DarkGray
+            Write-Host '  [i] 补丁：发现旧版补丁，已用备份还原，准备注入 v7' -ForegroundColor DarkGray
         } else {
             Write-Host '  [!] 补丁：有旧版补丁但没有备份，跳过（避免叠加）' -ForegroundColor Yellow
             return $false
         }
     }
-    # v6：不再往函数体里插代码（v4/v5 依赖"函数头 + 那句 explorer 调用"的字面结构，
-    # 换个 DSH 版本就被误判"结构变了"）。改成在文件末尾追加一段包装：
-    # 重新赋值模块导出的 revealNativePath —— ESM 导出是活绑定，import 方立刻生效。
-    # 只要这个模块里确实有这两个标识符，补丁就一定能打上；找不到才跳过（并落诊断文件）。
-    $hasReveal = $txt.Contains('revealNativePath')
-    $hasRun    = $txt.Contains('runNativeCommand')
-    if (-not ($hasReveal -and $hasRun)) {
-        Write-Host '  [!] 补丁：这个版本里没有 revealNativePath/runNativeCommand，跳过（功能退回原样）' -ForegroundColor Yellow
-        Write-PatchDiag -File $file -Text $txt -Note ('hasReveal=' + $hasReveal + ' hasRun=' + $hasRun + '（末尾包装注入找不到落点）')
+    # v7：不碰上游函数体，只在文件末尾追加包装（重新赋值导出的 revealNativePath，
+    # ESM 活绑定对 import 方立刻生效）。只要这个文件里有 revealNativePath 就能打上；
+    # runner 在包装里做三重兜底（internals.run → runNativeCommand → 退回原实现）。
+    if (-not $txt.Contains('revealNativePath')) {
+        Write-Host '  [!] 补丁：这个版本的 dsh-native-command 里找不到 revealNativePath，跳过（功能退回原样）' -ForegroundColor Yellow
+        Write-PatchDiag -File $file -Text $txt -Note ('顺着转发链走到 ' + $file + '，仍未找到 revealNativePath')
         return $false
     }
     $eol = "`n"
@@ -750,8 +782,8 @@ function Invoke-DshPatches {
     Copy-Item -LiteralPath $file -Destination ($file + '.dshbak') -Force
     [System.IO.File]::WriteAllText($file, $out)
     $chk = [System.IO.File]::ReadAllText($file)
-    if ($chk.Contains('dshRevealWrapped') -and $chk.Contains('reveal-foreground v6')) {
-        Write-Host '  [OK] 补丁：资源管理器窗口置顶 v6（已注入，原文件备份为 .dshbak）' -ForegroundColor Green
+    if ($chk.Contains('dshRevealWrapped') -and $chk.Contains('reveal-foreground v7')) {
+        Write-Host ('  [OK] 补丁：资源管理器窗口置顶 v7（已注入 ' + (Split-Path -Leaf $file) + '，原文件备份为 .dshbak）') -ForegroundColor Green
         return $true
     }
     Write-Host '  [!] 补丁：写入后自检没过，已留 .dshbak 备份' -ForegroundColor Red
@@ -1393,6 +1425,7 @@ function Show-Banner {
     Write-Host ''
     Write-Host '  ══════════════════════════════════════════════════════════════════' -ForegroundColor DarkCyan
     Write-Host '    D S H   启动器  ·  DeepSeek Harness' -ForegroundColor Cyan
+    Write-Host ('    启动器 ' + $script:LauncherVersion + '  ·  置顶补丁 ' + $script:PatchMarker) -ForegroundColor DarkGray
     Write-Host '  ══════════════════════════════════════════════════════════════════' -ForegroundColor DarkCyan
 }
 
