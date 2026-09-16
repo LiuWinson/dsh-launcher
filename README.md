@@ -148,6 +148,29 @@ powershell -File .\dsh-launcher.ps1 -Port 3099
 - 补丁注入：`powershell -File tests\test-bridge-daemon-patch.ps1` —— 启动器语法检查、把守护进程还原成
   原厂文件再让启动器的代码重新注入、与手工补丁**逐字节比对**、跑第二遍验幂等、`node --check`。
 
+### 出站通道：2026-09-16 起「只发钉钉」
+
+用户口径：**出站一律走钉钉，微信只当输入通道**（防止微信条数限制把通知堵住 —— 实测微信侧近 1 小时
+只发 4 条就 `sendMessage rate-limited (ret:-2)` → 全局熔断 30 秒；钉钉官方允许 20 条/分钟）。
+
+补丁 `tools\wechat-bridge-patch\patch-dingtalk-only.mjs`（守护进程侧，注册为补丁链第 9 条，**必须排在
+fanout-policy 之后**）：
+
+1. **PART1 出站微信总闸**：包住 `sender` 的 `sendText / sendFile / startTyping`（`send.js` 里
+   `api.sendMessage` 只有这两个调用点 ⇒ 覆盖面 100%）。配置关了微信出站时，发送变成"假装成功"的空操作：
+   上游不重试、不撞 `ret:-2`、不开熔断、不占微信 6 条/小时 配额；
+2. **PART2 钉钉拆条**：长文按 3000 字自动拆成多条（带 `(i/n)` 序号，官方单条 20000 字节），
+   不再截断到 3500 字；
+3. **PART3**：整轮回复正文交给拆条函数，不截断。
+
+开关在 `~\.dsh\wechat-bridge\push-channels.json`：`"wechatOutbound": false` + `"mirrorReplies": true`。
+**改这个开关立即生效**（每次发送现读配置，不用重启）；补丁本身要重启守护进程才生效。
+回滚：`wechatOutbound` 改回 `true`。
+
+> 连带修的一处：看门狗 `channelWarm()` 原来只看微信 `context-tokens.json` 是否新鲜（12 小时）——
+> 出站搬去钉钉后，"12 小时没在微信说话"会被误判成"通道冷"而**静默停掉所有提醒**。现在
+> `wechatOutbound:false` 且配了钉钉 webhook 即视为通道可用。
+
 ## 自动升级哪些、跳过哪些
 
 | 项 | 默认 | 说明 |

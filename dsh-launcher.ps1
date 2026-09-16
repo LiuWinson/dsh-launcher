@@ -1178,6 +1178,29 @@ function Invoke-BridgeFanoutPolicyPatch {
     Write-Host ('  [!] 扇出策略补丁：执行异常（exit ' + $rc + '）：' + $line) -ForegroundColor Yellow
     return $false
 }
+# ---------------------------------------------------------------------------
+#  微信桥接补丁（守护进程侧）：wechat-outbound-off —— 出站只发钉钉，微信只当输入通道
+#  用户 2026-09-16 定：关掉出站微信（push-channels.json 的 wechatOutbound=false），
+#  提醒 / 提问 / 审批 / 安抚 / 我的回复正文一律走钉钉；长文按 3000 字自动拆条。
+#  必须排在 fanout-policy 之后执行（PART3 改的是它注入的那段代码）。改完重启守护进程生效。
+# ---------------------------------------------------------------------------
+function Invoke-BridgeWechatOutboundPatch {
+    param([string]$DshHome, [string]$ProfileName)
+    $patchScript = 'C:\Users\Huawei\Documents\DSH\tools\wechat-bridge-patch\patch-dingtalk-only.mjs'
+    if (-not (Test-Path -LiteralPath $patchScript)) {
+        Write-Host '  [i] 出站钉钉化补丁：找不到补丁脚本，跳过' -ForegroundColor DarkGray
+        return $false
+    }
+    $out = & node $patchScript 2>&1
+    $rc = $LASTEXITCODE
+    $line = (($out | ForEach-Object { [string]$_ }) -join ' ').Trim()
+    if ($rc -eq 0 -and $line -match 'PATCHED|SKIP') {
+        Write-Host ('  [OK] 出站钉钉化补丁：' + $line) -ForegroundColor Green
+        return $true
+    }
+    Write-Host ('  [!] 出站钉钉化补丁：执行异常（exit ' + $rc + '）：' + $line) -ForegroundColor Yellow
+    return $false
+}
 function Invoke-BridgePatches {
     param([string]$DshHome, [string]$ProfileName)
     $a = Invoke-BridgePluginPatch -DshHome $DshHome -ProfileName $ProfileName
@@ -1187,7 +1210,8 @@ function Invoke-BridgePatches {
     $e = Invoke-BridgeSseHeartbeatPatch -DshHome $DshHome -ProfileName $ProfileName
     $f = Invoke-BridgeNotifyHardeningPatch -DshHome $DshHome -ProfileName $ProfileName
     $g = Invoke-BridgeFanoutPolicyPatch -DshHome $DshHome -ProfileName $ProfileName
-    return [bool]($a -or $b -or $c -or $d -or $e -or $f -or $g)
+    $h = Invoke-BridgeWechatOutboundPatch -DshHome $DshHome -ProfileName $ProfileName
+    return [bool]($a -or $b -or $c -or $d -or $e -or $f -or $g -or $h)
 }
 
 # ============================================================================
