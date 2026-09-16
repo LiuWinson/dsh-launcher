@@ -1225,6 +1225,108 @@ function Invoke-BridgeDingtalkFeedbackPatch {
     Write-Host ('  [!] 钉钉反馈补丁：执行异常（exit ' + $rc + '）：' + $line) -ForegroundColor Yellow
     return $false
 }
+# ---------------------------------------------------------------------------
+#  微信桥接补丁（插件侧）：bind-reply-delay —— 绑定成功的回执不再被守护进程重启吞掉
+#  背景（2026-09-16 实测）：用户在微信发 /session <尾号>，绑定**成功了**（写进了
+#  selected-sessions.json），但一条回复都没收到 —— 因为成功路径里立刻 await restartDaemon()，
+#  而那条「✅ 已绑定项目会话：…」的回执是**旧守护进程**发的，进程在发送前就被重启干掉了。
+#  修法：把重启推迟 1.5 秒，回执先出去。注意这是**插件**补丁 ⇒ 要重启 DSH 才生效。
+# ---------------------------------------------------------------------------
+function Invoke-BridgeBindReplyPatch {
+    param([string]$DshHome, [string]$ProfileName)
+    $patchScript = 'C:\Users\Huawei\Documents\DSH\tools\wechat-bridge-patch\patch-bind-reply-delay.mjs'
+    if (-not (Test-Path -LiteralPath $patchScript)) {
+        Write-Host '  [i] 绑定回执补丁：找不到补丁脚本，跳过' -ForegroundColor DarkGray
+        return $false
+    }
+    $out = & node $patchScript 2>&1
+    $rc = $LASTEXITCODE
+    $line = (($out | ForEach-Object { [string]$_ }) -join ' ').Trim()
+    if ($rc -eq 0 -and $line -match 'PATCHED|SKIP') {
+        Write-Host ('  [OK] 绑定回执补丁：' + $line) -ForegroundColor Green
+        return $true
+    }
+    Write-Host ('  [!] 绑定回执补丁：执行异常（exit ' + $rc + '）：' + $line) -ForegroundColor Yellow
+    return $false
+}
+# ---------------------------------------------------------------------------
+#  微信桥接补丁（插件侧）：assistant-text-forward —— 按当前 DSH 的事件名转发正文
+#  根因（2026-09-16 实测）：插件只认 assistant/chunk + chunk.type=text-delta，但当前 DSH 的
+#  SessionEventMap 里没有 assistant/chunk，正文在 assistant/message 的 data.message.content。
+#  收不到 chunk ⇒ stale-done-guard 的 _bridgeSawText 永远 false ⇒ turn/end 被当"上一轮残留"忽略
+#  ⇒ 守护进程收不到 done ⇒ 这一轮永不结束 ⇒ 用户后续消息全卡在队列里（就是"发第二条没反应"）。
+#  修法：把 assistant/message 的正文当一个 chunk 转发（同一轮内去重，turn/start 清空）。
+#  注意：这是**插件**补丁 ⇒ 要重启 DSH 才生效。
+# ---------------------------------------------------------------------------
+function Invoke-BridgeAssistantTextPatch {
+    param([string]$DshHome, [string]$ProfileName)
+    $patchScript = 'C:\Users\Huawei\Documents\DSH\tools\wechat-bridge-patch\patch-assistant-text-forward.mjs'
+    if (-not (Test-Path -LiteralPath $patchScript)) {
+        Write-Host '  [i] 正文转发补丁：找不到补丁脚本，跳过' -ForegroundColor DarkGray
+        return $false
+    }
+    $out = & node $patchScript 2>&1
+    $rc = $LASTEXITCODE
+    $line = (($out | ForEach-Object { [string]$_ }) -join ' ').Trim()
+    if ($rc -eq 0 -and $line -match 'PATCHED|SKIP') {
+        Write-Host ('  [OK] 正文转发补丁：' + $line) -ForegroundColor Green
+        return $true
+    }
+    Write-Host ('  [!] 正文转发补丁：执行异常（exit ' + $rc + '）：' + $line) -ForegroundColor Yellow
+    return $false
+}
+# ---------------------------------------------------------------------------
+#  微信桥接补丁（守护进程侧）：daemon-scope-fix —— 作用域修复
+#  症状（2026-09-16 实测）：微信发消息 → 钉钉只收到兜底文案「处理消息时出错，请稍后重试。」；
+#  日志 Flush send failed {"error":"wechatOutboundOff is not defined"} /
+#       Error in sendToDsh {"error":"fanoutPush is not defined"}。
+#  根因：fanoutPush / wechatOutboundOff 定义在 startDaemon() **内部**，而 sendToDsh() 是顶层函数，
+#        看不见它们（mirrorReplies:false 时那行从不执行，所以历史上没暴露）。
+#  修法：模块级 hook + startDaemon 赋值；sendToDsh 里改走 hook（取不到就跳过，不再抛错）。
+#  必须排在 dingtalk-feedback 之后。改完重启守护进程即可生效。
+# ---------------------------------------------------------------------------
+function Invoke-BridgeDaemonScopePatch {
+    param([string]$DshHome, [string]$ProfileName)
+    $patchScript = 'C:\Users\Huawei\Documents\DSH\tools\wechat-bridge-patch\patch-daemon-scope-fix.mjs'
+    if (-not (Test-Path -LiteralPath $patchScript)) {
+        Write-Host '  [i] 作用域修复补丁：找不到补丁脚本，跳过' -ForegroundColor DarkGray
+        return $false
+    }
+    $out = & node $patchScript 2>&1
+    $rc = $LASTEXITCODE
+    $line = (($out | ForEach-Object { [string]$_ }) -join ' ').Trim()
+    if ($rc -eq 0 -and $line -match 'PATCHED|SKIP') {
+        Write-Host ('  [OK] 作用域修复补丁：' + $line) -ForegroundColor Green
+        return $true
+    }
+    Write-Host ('  [!] 作用域修复补丁：执行异常（exit ' + $rc + '）：' + $line) -ForegroundColor Yellow
+    return $false
+}
+# ---------------------------------------------------------------------------
+#  微信桥接补丁（守护进程侧）：scope-alias —— 模块级同名别名，彻底消除作用域坑
+#  fanoutPush / wechatOutboundOff 原本只在 startDaemon() 内部可见，顶层 sendToDsh() 里裸调用会抛
+#  ReferenceError（用户看到「处理消息时出错，请稍后重试。」）；且 push-fanout 补丁的幂等判据是
+#  "代码里有没有 fanoutPush(resultText"，那行一改就会被它**再插一遍**裸调用。
+#  修法：模块级声明同名别名（转发运行时 hook）。startDaemon 内部的同名声明遮蔽别名 → 内部行为不变；
+#  顶层任何裸调用都安全。必须排在 daemon-scope-fix 之后。改完重启守护进程生效。
+# ---------------------------------------------------------------------------
+function Invoke-BridgeScopeAliasPatch {
+    param([string]$DshHome, [string]$ProfileName)
+    $patchScript = 'C:\Users\Huawei\Documents\DSH\tools\wechat-bridge-patch\patch-scope-alias.mjs'
+    if (-not (Test-Path -LiteralPath $patchScript)) {
+        Write-Host '  [i] 作用域别名补丁：找不到补丁脚本，跳过' -ForegroundColor DarkGray
+        return $false
+    }
+    $out = & node $patchScript 2>&1
+    $rc = $LASTEXITCODE
+    $line = (($out | ForEach-Object { [string]$_ }) -join ' ').Trim()
+    if ($rc -eq 0 -and $line -match 'PATCHED|SKIP') {
+        Write-Host ('  [OK] 作用域别名补丁：' + $line) -ForegroundColor Green
+        return $true
+    }
+    Write-Host ('  [!] 作用域别名补丁：执行异常（exit ' + $rc + '）：' + $line) -ForegroundColor Yellow
+    return $false
+}
 function Invoke-BridgePatches {
     param([string]$DshHome, [string]$ProfileName)
     $a = Invoke-BridgePluginPatch -DshHome $DshHome -ProfileName $ProfileName
@@ -1236,7 +1338,11 @@ function Invoke-BridgePatches {
     $g = Invoke-BridgeFanoutPolicyPatch -DshHome $DshHome -ProfileName $ProfileName
     $h = Invoke-BridgeWechatOutboundPatch -DshHome $DshHome -ProfileName $ProfileName
     $i = Invoke-BridgeDingtalkFeedbackPatch -DshHome $DshHome -ProfileName $ProfileName
-    return [bool]($a -or $b -or $c -or $d -or $e -or $f -or $g -or $h -or $i)
+    $j = Invoke-BridgeBindReplyPatch -DshHome $DshHome -ProfileName $ProfileName
+    $k = Invoke-BridgeAssistantTextPatch -DshHome $DshHome -ProfileName $ProfileName
+    $l = Invoke-BridgeDaemonScopePatch -DshHome $DshHome -ProfileName $ProfileName
+    $m = Invoke-BridgeScopeAliasPatch -DshHome $DshHome -ProfileName $ProfileName
+    return [bool]($a -or $b -or $c -or $d -or $e -or $f -or $g -or $h -or $i -or $j -or $k -or $l -or $m)
 }
 
 # ============================================================================
