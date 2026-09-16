@@ -36,6 +36,7 @@
 | `启动 DSH.cmd`（桌面：**DSH 启动器**） | 唯一入口，全自动流程 |
 | `停止 DSH.cmd` | 停止正在运行的 DSH（连同它拉起的子进程，比如微信桥接） |
 | `dsh-launcher.ps1` | 主逻辑 |
+| `check-launcher.mjs` | 静态体检：查「调用了但没定义的函数」（PS 语法检查查不出这类，见「已知问题 1」）。**改完启动器必跑** |
 | `tests\test-bridge-daemon-patch.ps1` | 微信守护进程补丁的回归测试（补丁注入 / 幂等 / 语法） |
 
 ## 命令行用法
@@ -167,6 +168,55 @@ powershell -File .\dsh-launcher.ps1 -Port 3099
 | 3 | 插件 | 包版本 + `pnpm-lock.yaml` 锁定提交 + GitHub API |
 | 4 | 模型 | `~/.dsh/settings.yaml` + 内核里的模型清单 |
 | 5 | Node | npmmirror 的 node 二进制索引 |
+
+## 已知问题
+
+### 1. 升级路径曾整体失效：4 个函数被误删（v4 改造引入，2026-09-15 修复 `0a12e80`）
+
+**症状**：只有「需要升级」的机器会炸 —— 执行升级那一步报
+`无法将“Invoke-NpmCmd”项识别为 cmdlet`；不需要升级的机器一切正常。所以很容易被误判成
+"公司网络/代理的问题"，实际上跟网络无关。
+
+**真因**：v4 改造 `dsh-launcher.ps1` 时，`Resolve-Executable` / `Invoke-ToolCmd` /
+`Invoke-NpmCmd` / `Invoke-PnpmCmd` 四个函数被整段删掉了。PowerShell 的引用检查是**运行期**的，
+所以语法检查全绿、启动也照常，只有走到升级分支才暴露。
+
+**现在**：已从 `pre-v4.bak` 原样搬回并实测（npm 10.9.3 / pnpm 12.3.4 返回 0）。
+并新增 `check-launcher.mjs` 补上这个盲区 —— **改完 `dsh-launcher.ps1` 至少跑一次**：
+
+```powershell
+node check-launcher.mjs          # 期望：函数定义 41 个 | 发现未定义就调用的: 0 个
+powershell -File .\dsh-launcher.ps1 -PatchOnly   # 八条补丁自检应全 [OK]
+```
+
+**教训**：语法检查 ≠ 能跑起来。这个脚本里凡是"分支才走到"的路径（升级、跳步、换源），
+只有真机能暴露问题 —— 所以改动后要真跑一遍那条分支，而不是只看 parse 通过。
+
+### 2. 公司内网到 npm 源不稳：拉 tarball 报 E504
+
+**现象**：三个源 `ping` 都通，但 `npm install` 拉 tarball 时网关 504（E504/E502/E503）。
+根因是链路抖动 + 并发，不是源挂了。
+
+**现状**：升级命令已带抗抖动参数（`e4a78f9`）：
+
+```
+--fetch-retries=5 --fetch-retry-mintimeout=20000 --fetch-retry-maxtimeout=120000
+--fetch-timeout=900000 --maxsockets=4
+```
+
+失败时启动器会把 npm 错误码翻译成人话并打印下一步（`755d256`）。
+
+**若仍然失败，只需要回报一件事：卡在哪一步。** 是 `[升级] 安装 @deepseek-ai/dsh@x`，
+还是 `[升级] 内核核心包`。v8.1 起诊断会**同时打印一份短版到控制台**，内网发不出文件也能直接截图回报。
+
+**兜底（完全不依赖网络）**：把一台已经能正常运行的机器的整套运行环境目录拷到对方**同路径**：
+
+```
+%LOCALAPPDATA%\npm-cache\_npx\1e7f6d9597241db0      （约 223 MB / 2.5 万个文件）
+```
+
+拷贝前先退出 DSH。拷完 `powershell -File .\dsh-launcher.ps1 -SkipCheck` 直接启动即可 ——
+八条补丁会在启动时自动重打，不需要联网。
 
 ## 踩过的坑（改这个脚本前先看）
 
