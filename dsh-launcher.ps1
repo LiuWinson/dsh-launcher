@@ -1201,6 +1201,30 @@ function Invoke-BridgeWechatOutboundPatch {
     Write-Host ('  [!] 出站钉钉化补丁：执行异常（exit ' + $rc + '）：' + $line) -ForegroundColor Yellow
     return $false
 }
+# ---------------------------------------------------------------------------
+#  微信桥接补丁（守护进程侧）：dingtalk-feedback —— 被总闸掐掉的"用户可见消息"补投钉钉
+#  背景（2026-09-16 实测）：关掉微信出站后，用户在微信发 /session 的命令回执（43 字）
+#  被总闸一起掐掉 → 微信和钉钉两边都看不到反馈。命令回执 / 错误提示 / "DSH 无返回内容"
+#  这类消息必须让用户看到，这里补一条"抑制时镜像到钉钉"（同文 15 秒去重，避免重复）。
+#  必须排在 wechat-outbound 补丁之后执行（改的是它注入的那段代码）。改完重启守护进程生效。
+# ---------------------------------------------------------------------------
+function Invoke-BridgeDingtalkFeedbackPatch {
+    param([string]$DshHome, [string]$ProfileName)
+    $patchScript = 'C:\Users\Huawei\Documents\DSH\tools\wechat-bridge-patch\patch-dingtalk-feedback.mjs'
+    if (-not (Test-Path -LiteralPath $patchScript)) {
+        Write-Host '  [i] 钉钉反馈补丁：找不到补丁脚本，跳过' -ForegroundColor DarkGray
+        return $false
+    }
+    $out = & node $patchScript 2>&1
+    $rc = $LASTEXITCODE
+    $line = (($out | ForEach-Object { [string]$_ }) -join ' ').Trim()
+    if ($rc -eq 0 -and $line -match 'PATCHED|SKIP') {
+        Write-Host ('  [OK] 钉钉反馈补丁：' + $line) -ForegroundColor Green
+        return $true
+    }
+    Write-Host ('  [!] 钉钉反馈补丁：执行异常（exit ' + $rc + '）：' + $line) -ForegroundColor Yellow
+    return $false
+}
 function Invoke-BridgePatches {
     param([string]$DshHome, [string]$ProfileName)
     $a = Invoke-BridgePluginPatch -DshHome $DshHome -ProfileName $ProfileName
@@ -1211,7 +1235,8 @@ function Invoke-BridgePatches {
     $f = Invoke-BridgeNotifyHardeningPatch -DshHome $DshHome -ProfileName $ProfileName
     $g = Invoke-BridgeFanoutPolicyPatch -DshHome $DshHome -ProfileName $ProfileName
     $h = Invoke-BridgeWechatOutboundPatch -DshHome $DshHome -ProfileName $ProfileName
-    return [bool]($a -or $b -or $c -or $d -or $e -or $f -or $g -or $h)
+    $i = Invoke-BridgeDingtalkFeedbackPatch -DshHome $DshHome -ProfileName $ProfileName
+    return [bool]($a -or $b -or $c -or $d -or $e -or $f -or $g -or $h -or $i)
 }
 
 # ============================================================================
